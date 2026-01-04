@@ -58,21 +58,28 @@ jobs:
 
     - name: Load Config & Inject Scripts
       run: |
+        # 1. 加载配置文件
         [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
         
-        # 1. 预埋 Nikki 规则
+        # 2. 预埋 Nikki 规则
         mkdir -p openwrt/files/usr/share/nikki
         echo ">>> Downloading Nikki Rules..."
         wget -O openwrt/files/usr/share/nikki/geoip.db https://github.com/SagerNet/sing-geoip/releases/latest/download/geoip.db
         wget -O openwrt/files/usr/share/nikki/geosite.db https://github.com/SagerNet/sing-geosite/releases/latest/download/geosite.db
         chmod -R 755 openwrt/files/usr/share/nikki
 
-        # 2. 注入启动脚本
+        # 3. 注入启动脚本
         mkdir -p openwrt/files/etc/uci-defaults
         if [ -e $DIY_SCRIPT ]; then
+            # 命名为 99-custom 确保最后执行
             cat $DIY_SCRIPT > openwrt/files/etc/uci-defaults/99-custom
-            chmod 755 openwrt/files/etc/uci-defaults/99-custom
+            # !!! 赋予执行权限是关键 !!!
+            chmod +x openwrt/files/etc/uci-defaults/99-custom
         fi
+
+        # 4. 双重保险：直接修改源码中的默认语言设置
+        # 将默认的 auto 改为 zh_Hans
+        sed -i 's/luci.main.lang=auto/luci.main.lang=zh_Hans/g' openwrt/feeds/luci/modules/luci-base/root/etc/config/luci 2>/dev/null || true
 
         cd openwrt
         make defconfig
