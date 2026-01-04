@@ -1,4 +1,4 @@
-name: Build OpenWrt 24.10 Ultimate
+name: Build OpenWrt Hybrid Ultimate
 
 on:
   workflow_dispatch:
@@ -11,7 +11,6 @@ on:
 env:
   REPO_URL: https://github.com/openwrt/openwrt
   REPO_BRANCH: openwrt-24.10
-  FEEDS_CONF: custom.feeds.conf
   CONFIG_FILE: configs/x86.config
   DIY_SCRIPT: scripts/init-settings.sh
   TZ: Asia/Shanghai
@@ -22,7 +21,7 @@ jobs:
 
     steps:
     - name: Checkout Builder
-      uses: actions/checkout@v4  # 已升级到 v4
+      uses: actions/checkout@v4
 
     - name: Initialize Environment
       env:
@@ -44,7 +43,7 @@ jobs:
         git clone -b $REPO_BRANCH --single-branch $REPO_URL openwrt
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
-    - name: Update Feeds (Custom)
+    - name: Update Feeds
       run: |
         cd openwrt
         cat > feeds.conf.default <<EOF
@@ -57,22 +56,22 @@ jobs:
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    - name: Load Config & Download "Files" (Nikki Rules)
+    - name: Load Config & Inject Scripts
       run: |
         [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
         
-        # Nikki 规则预埋
+        # 1. 预埋 Nikki 规则
         mkdir -p openwrt/files/usr/share/nikki
         echo ">>> Downloading Nikki Rules..."
         wget -O openwrt/files/usr/share/nikki/geoip.db https://github.com/SagerNet/sing-geoip/releases/latest/download/geoip.db
         wget -O openwrt/files/usr/share/nikki/geosite.db https://github.com/SagerNet/sing-geosite/releases/latest/download/geosite.db
         chmod -R 755 openwrt/files/usr/share/nikki
 
-        # UCI 脚本注入
+        # 2. 注入启动脚本
         mkdir -p openwrt/files/etc/uci-defaults
         if [ -e $DIY_SCRIPT ]; then
             cat $DIY_SCRIPT > openwrt/files/etc/uci-defaults/99-custom
-            chmod +x openwrt/files/etc/uci-defaults/99-custom
+            chmod 755 openwrt/files/etc/uci-defaults/99-custom
         fi
 
         cd openwrt
@@ -106,15 +105,15 @@ jobs:
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
         echo "status=success" >> $GITHUB_OUTPUT
 
-    - name: Upload Firmware to Artifacts
-      uses: actions/upload-artifact@v4   # 关键修复：升级到 v4
+    - name: Upload Firmware
+      uses: actions/upload-artifact@v4
       if: steps.organize.outputs.status == 'success'
       with:
         name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE }}
 
-    - name: Generate Release
-      uses: softprops/action-gh-release@v2  # 推荐：升级到 v2
+    - name: Release Firmware
+      uses: softprops/action-gh-release@v2
       if: steps.organize.outputs.status == 'success'
       with:
         tag_name: v${{ env.FILE_DATE }}
