@@ -19,7 +19,7 @@ uci set network.lan.netmask='255.255.255.0'
 # 强制绑定 eth0 到 LAN
 uci set network.lan.device='eth0'
 # 尝试将物理机常见的其他网口也绑入 LAN (作为交换机使用)
-uci set network.lan.ports='eth0 eth2 eth3 eth4'
+uci set network.lan.ports='eth0 eth2 eth3'
 
 # 配置 WAN 口 (如果有 eth1)
 uci delete network.wan 2>/dev/null
