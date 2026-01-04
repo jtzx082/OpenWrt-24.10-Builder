@@ -1,0 +1,127 @@
+name: Build OpenWrt 24.10 Ultimate
+
+on:
+  workflow_dispatch:
+    inputs:
+      ssh:
+        description: 'SSH connection to Actions (Optional)'
+        required: false
+        default: 'false'
+
+env:
+  REPO_URL: https://github.com/openwrt/openwrt
+  REPO_BRANCH: openwrt-24.10
+  FEEDS_CONF: custom.feeds.conf
+  CONFIG_FILE: configs/x86.config
+  DIY_SCRIPT: scripts/init-settings.sh
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Checkout Builder
+      uses: actions/checkout@v3
+
+    - name: Initialize Environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+        sudo -E apt-get -qq update
+        # 安装您在宝塔脚本中使用的所有依赖
+        sudo -E apt-get -qq install -y build-essential asciidoc binutils bzip2 gawk gettext git libncurses5-dev libz-dev patch python3 python2.7 unzip zlib1g-dev lib32gcc-s1 libc6-dev-i386 subversion flex uglifyjs git-core gcc-multilib p7zip p7zip-full msmtp libssl-dev texinfo libglib2.0-dev xmlto qemu-utils upx-ucl libelf-dev autoconf automake libtool autopoint device-tree-compiler g++-multilib antlr3 gperf wget curl swig rsync dosfstools mtools
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "$TZ"
+        sudo mkdir -p /workdir
+        sudo chown $USER:$GROUPS /workdir
+
+    - name: Clone OpenWrt Source
+      working-directory: /workdir
+      run: |
+        df -hT $PWD
+        git clone -b $REPO_BRANCH --single-branch $REPO_URL openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+
+    - name: Update Feeds (Custom)
+      run: |
+        cd openwrt
+        # 写入您定义的 Feed 源
+        cat > feeds.conf.default <<EOF
+        src-git packages https://git.openwrt.org/feed/packages.git;openwrt-24.10
+        src-git luci https://git.openwrt.org/project/luci.git;openwrt-24.10
+        src-git routing https://git.openwrt.org/feed/routing.git;openwrt-24.10
+        src-git telephony https://git.openwrt.org/feed/telephony.git;openwrt-24.10
+        EOF
+        
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: Load Config & Download "Files" (Nikki Rules)
+      run: |
+        # 1. 复制配置文件
+        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
+        
+        # 2. 【核心】预埋 Nikki 规则文件 (模拟您的绝招)
+        mkdir -p openwrt/files/usr/share/nikki
+        echo ">>> Downloading Nikki Rules..."
+        wget -O openwrt/files/usr/share/nikki/geoip.db https://github.com/SagerNet/sing-geoip/releases/latest/download/geoip.db
+        wget -O openwrt/files/usr/share/nikki/geosite.db https://github.com/SagerNet/sing-geosite/releases/latest/download/geosite.db
+        chmod -R 755 openwrt/files/usr/share/nikki
+
+        # 3. 注入 UCI 启动脚本
+        mkdir -p openwrt/files/etc/uci-defaults
+        if [ -e $DIY_SCRIPT ]; then
+            cat $DIY_SCRIPT > openwrt/files/etc/uci-defaults/99-custom
+            chmod +x openwrt/files/etc/uci-defaults/99-custom
+        fi
+
+        # 4. 生成完整配置
+        cd openwrt
+        make defconfig
+
+    - name: Download Packages
+      id: package
+      run: |
+        cd openwrt
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: Compile Firmware
+      id: compile
+      run: |
+        cd openwrt
+        echo -e "$(nproc) thread compile"
+        make -j$(nproc) || make -j1 V=s
+        echo "status=success" >> $GITHUB_OUTPUT
+        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
+        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+
+    - name: Organize Files
+      id: organize
+      if: steps.compile.outputs.status == 'success'
+      run: |
+        cd openwrt/bin/targets/*/*
+        rm -rf packages
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Upload Firmware to Artifacts
+      uses: actions/upload-artifact@v3
+      if: steps.organize.outputs.status == 'success'
+      with:
+        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: ${{ env.FIRMWARE }}
+
+    - name: Generate Release
+      uses: softprops/action-gh-release@v1
+      if: steps.organize.outputs.status == 'success'
+      with:
+        tag_name: v${{ env.FILE_DATE }}
+        files: ${{ env.FIRMWARE }}/*
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
