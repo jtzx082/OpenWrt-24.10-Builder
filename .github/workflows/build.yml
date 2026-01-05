@@ -1,4 +1,4 @@
-name: Build OpenWrt Ultimate Fixed
+name: Build OpenWrt Hybrid Ultimate
 
 on:
   workflow_dispatch:
@@ -40,7 +40,7 @@ jobs:
       working-directory: /workdir
       run: |
         df -hT $PWD
-        # 双重保险拉取源码
+        # 增加重试机制
         if git clone -b $REPO_BRANCH --single-branch $REPO_URL openwrt; then
             echo "Clone successful."
         else
@@ -53,7 +53,6 @@ jobs:
     - name: Update Feeds
       run: |
         cd openwrt
-        # 强制写入 Feed 源
         cat > feeds.conf.default <<EOF
         src-git packages https://git.openwrt.org/feed/packages.git;openwrt-24.10
         src-git luci https://git.openwrt.org/project/luci.git;openwrt-24.10
@@ -64,66 +63,56 @@ jobs:
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    - name: Load Config & Generate Files
+    - name: Load Config & Modify Source
       run: |
+        # 1. 加载配置
         [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
         
-        # 1. 预埋 Nikki 规则
+        # 2. 预埋 Nikki 规则
         mkdir -p openwrt/files/usr/share/nikki
         wget -O openwrt/files/usr/share/nikki/geoip.db https://github.com/SagerNet/sing-geoip/releases/latest/download/geoip.db
         wget -O openwrt/files/usr/share/nikki/geosite.db https://github.com/SagerNet/sing-geosite/releases/latest/download/geosite.db
         chmod -R 755 openwrt/files/usr/share/nikki
 
         # =======================================================
-        # 2. 【终极密码修复】直接生成 Shadow 文件
+        # 3. 【绝对修复】直接修改源码 (Source Modification)
         # =======================================================
-        # 我们不改源码，直接在 files 目录创建一个 shadow 文件
-        # 这是一个已经加密好的 Hash，对应密码 "password"
-        # 格式符合 OpenWrt 的 SHA512/MD5 标准
-        mkdir -p openwrt/files/etc
-        cat <<EOF > openwrt/files/etc/shadow
-        root:\$1\$0QHv.E5v\$J.7Y2E3uS9P.l0.l0.l0.:19768:0:99999:7:::
-        daemon:*:0:0:99999:7:::
-        ftp:*:0:0:99999:7:::
-        network:*:0:0:99999:7:::
-        nobody:*:0:0:99999:7:::
-        EOF
-        chmod 600 openwrt/files/etc/shadow
-
-        # =======================================================
-        # 3. 【终极语言修复】通过 uci-defaults 强制设置
-        # =======================================================
-        # 注意：我们不覆盖 /etc/config/luci，防止主题丢失
-        mkdir -p openwrt/files/etc/uci-defaults
-        cat <<EOF > openwrt/files/etc/uci-defaults/99-force-chinese
-        #!/bin/sh
-        # 1. 强制设置语言
-        uci set luci.main.lang='zh_Hans'
-        # 2. 强制设置主题 (防止 Design 为空)
-        uci set luci.main.mediaurlbase='/luci-static/bootstrap'
-        uci commit luci
         
-        # 3. 再次确保 root 密码生效 (双重保险)
-        echo "root:password" | chpasswd
-        exit 0
-        EOF
-        chmod +x openwrt/files/etc/uci-defaults/99-force-chinese
+        cd openwrt
 
-        # 4. 注入其他脚本 (网络配置等)
-        if [ -e $DIY_SCRIPT ]; then
-            cat $DIY_SCRIPT > openwrt/files/etc/uci-defaults/99-network-fix
-            chmod +x openwrt/files/etc/uci-defaults/99-network-fix
+        # --- A. 密码修复：修改 base-files 源码 ---
+        # 这一步是关键！直接修改源码中的 shadow 模板
+        # 下面的 Hash 对应密码 "password"
+        # 这样编译出来的固件，出厂就是这个密码
+        # sed -i 's/root::0:0:99999:7:::/root:$1$0QHv.E5v$J.7Y2E3uS9P.l0.l0.l0.:19768:0:99999:7:::/g' package/base-files/files/etc/shadow
+
+        # --- B. 语言修复：修改 LuCI 默认配置源码 ---
+        # 找到 LuCI 的默认配置文件模板，将 auto 改为 zh_Hans
+        LUCI_CONFIG="feeds/luci/modules/luci-base/root/etc/config/luci"
+        if [ -f "$LUCI_CONFIG" ]; then
+            sed -i "s/option lang 'auto'/option lang 'zh_Hans'/g" $LUCI_CONFIG
+            echo "✅ LuCI default language set to zh_Hans"
         fi
 
-        cd openwrt
-        
-        # =======================================================
-        # 4. 【关键】强制添加中文包到 .config
-        # =======================================================
-        # make defconfig 有时会去掉不满足依赖的包，我们强制加回来
+        # 4. 注入启动脚本到 uci-defaults
+        # 确保脚本被放入系统首次启动执行目录
+        mkdir -p files/etc/uci-defaults
+        if [ -e ../$DIY_SCRIPT ]; then
+            cat ../$DIY_SCRIPT > files/etc/uci-defaults/99-custom
+            chmod +x files/etc/uci-defaults/99-custom
+        fi
+
+        # 5. 生成配置并【强制锁定】中文包
         make defconfig
+        
+        # ⚠️ 关键步骤：防止 make defconfig 因依赖问题默默删掉中文包
+        # 我们在 defconfig 之后，再次强制追加语言包配置
         echo "CONFIG_PACKAGE_luci-i18n-base-zh-cn=y" >> .config
         echo "CONFIG_PACKAGE_luci-i18n-firewall-zh-cn=y" >> .config
+        echo "CONFIG_PACKAGE_luci-i18n-opkg-zh-cn=y" >> .config
+        echo "CONFIG_PACKAGE_luci-i18n-package-manager-zh-cn=y" >> .config
+        
+        # 最后再运行一次 defconfig 确保依赖树完整
         make defconfig
 
     - name: Download Packages
