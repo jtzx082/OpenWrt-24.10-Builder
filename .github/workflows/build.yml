@@ -40,7 +40,7 @@ jobs:
       working-directory: /workdir
       run: |
         df -hT $PWD
-        # 增加重试机制防止网络超时
+        # 增加重试机制
         if git clone -b $REPO_BRANCH --single-branch $REPO_URL openwrt; then
             echo "Clone successful."
         else
@@ -63,7 +63,7 @@ jobs:
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    - name: Load Config & Generate Files
+    - name: Load Config & Modify Source
       run: |
         # 1. 加载配置
         [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
@@ -75,19 +75,33 @@ jobs:
         chmod -R 755 openwrt/files/usr/share/nikki
 
         # =======================================================
-        # 3. 【绝对修复】直接生成系统文件 (Files Overlay)
+        # 3. 【绝对修复】直接修改源码 (Source Modification)
         # =======================================================
         
-        # --- A. 密码修复 (直接写入 Shadow 文件) ---
-        # 这是一个标准的 OpenWrt 密码 Hash，对应密码 "password"
-        # 写入此文件后，系统无需任何脚本，开机即为此密码
-        mkdir -p openwrt/files/etc
-        echo 'root:$1$0QHv.E5v$J.7Y2E3uS9P.l0.l0.l0.:19768:0:99999:7:::' > openwrt/files/etc/shadow
+        cd openwrt
 
-        # --- B. 网络修复 (直接生成 network 配置) ---
+        # --- A. 密码修复：修改 base-files 源码 ---
+        # 使用 openssl 生成标准的 MD5 密码 Hash (对应 "password")
+        # 这一步确保密码是 Linux 系统原生认可的格式
+        PASS_HASH=$(openssl passwd -1 "password")
+        # 将 Hash 写入 package/base-files 的模板文件中
+        sed -i "s|^root:[^:]* :|root:$PASS_HASH:|g" package/base-files/files/etc/shadow
+
+        # --- B. 语言修复：修改 LuCI 默认配置源码 ---
+        # 找到 LuCI 的默认配置文件模板
+        LUCI_CONFIG="feeds/luci/modules/luci-base/root/etc/config/luci"
+        # 将默认语言 auto 替换为 zh_Hans
+        if [ -f "$LUCI_CONFIG" ]; then
+            sed -i "s/option lang 'auto'/option lang 'zh_Hans'/g" $LUCI_CONFIG
+            echo "✅ LuCI default language set to zh_Hans"
+        else
+            echo "⚠️ Warning: LuCI config file not found!"
+        fi
+
+        # --- C. 网络修复：直接生成 network 配置 (防止脚本不执行) ---
         # 强制 eth0=LAN, eth1=WAN，解决 PVE 识别混乱
-        mkdir -p openwrt/files/etc/config
-        cat <<EOF > openwrt/files/etc/config/network
+        mkdir -p files/etc/config
+        cat <<EOF > files/etc/config/network
         config interface 'loopback'
             option device 'lo'
             option proto 'static'
@@ -119,11 +133,10 @@ jobs:
             option proto 'dhcpv6'
         EOF
 
-        # --- C. 防火墙修复 (解决有 IP 没网的问题) ---
-        # 强制生成防火墙配置，确保 WAN 口开启 Masquerade (NAT)
-        # 我们使用 uci-defaults 注入防火墙规则，比直接覆盖 firewall 文件更安全
-        mkdir -p openwrt/files/etc/uci-defaults
-        cat <<EOF > openwrt/files/etc/uci-defaults/99-fix-firewall
+        # --- D. 防火墙修复：通过 uci-defaults 注入 ---
+        # 确保 WAN 口开启 Masquerade (NAT)
+        mkdir -p files/etc/uci-defaults
+        cat <<EOF > files/etc/uci-defaults/99-fix-firewall
         #!/bin/sh
         # 强制将 wan/wan6 加入 wan 区域
         uci delete firewall.@zone[1].network 2>/dev/null
@@ -134,32 +147,19 @@ jobs:
         uci set firewall.@zone[1].mtu_fix='1'
         # 开启转发
         uci set firewall.@defaults[0].forward='ACCEPT'
+        uci set firewall.@defaults[0].input='ACCEPT'
+        uci set firewall.@defaults[0].output='ACCEPT'
         uci commit firewall
         exit 0
         EOF
-        chmod +x openwrt/files/etc/uci-defaults/99-fix-firewall
+        chmod +x files/etc/uci-defaults/99-fix-firewall
 
-        # --- D. 语言修复 (解决开机英文/界面为空) ---
-        # 24.10 版本必须设置 zh_Hans。
-        # 我们不覆盖 /etc/config/luci (这会导致 Design 空白)，而是用脚本设置。
-        cat <<EOF > openwrt/files/etc/uci-defaults/99-fix-language
-        #!/bin/sh
-        uci set luci.main.lang='zh_Hans'
-        # 强制指定 Bootstrap 主题，防止 Design 为空
-        uci set luci.main.mediaurlbase='/luci-static/bootstrap'
-        uci commit luci
-        exit 0
-        EOF
-        chmod +x openwrt/files/etc/uci-defaults/99-fix-language
-
-        # 4. 注入其他脚本 (rc.local 等)
-        mkdir -p openwrt/files/etc/uci-defaults
-        if [ -e $DIY_SCRIPT ]; then
-            cat $DIY_SCRIPT > openwrt/files/etc/uci-defaults/99-custom
-            chmod +x openwrt/files/etc/uci-defaults/99-custom
+        # 4. 注入其他脚本
+        if [ -e ../$DIY_SCRIPT ]; then
+            cat ../$DIY_SCRIPT > files/etc/uci-defaults/99-custom
+            chmod +x files/etc/uci-defaults/99-custom
         fi
 
-        cd openwrt
         make defconfig
 
     - name: Download Packages
