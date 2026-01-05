@@ -36,27 +36,18 @@ jobs:
         sudo mkdir -p /workdir
         sudo chown $USER:$GROUPS /workdir
 
-    - name: Clone OpenWrt Source (With Retry & Fallback)
+    - name: Clone OpenWrt Source
       working-directory: /workdir
       run: |
         df -hT $PWD
-        echo ">>> Cloning OpenWrt Source..."
-        
-        # 尝试 1: 使用 GitHub 源
+        # 增加重试机制防止网络超时
         if git clone -b $REPO_BRANCH --single-branch $REPO_URL openwrt; then
-            echo ">>> Clone successful from GitHub."
+            echo "Clone successful."
         else
-            echo "!!! GitHub clone failed. Waiting 5s before trying official source..."
+            echo "Clone failed, retrying..."
             sleep 5
-            # 尝试 2: 使用 OpenWrt 官方源 (作为备用)
-            if git clone -b $REPO_BRANCH --single-branch https://git.openwrt.org/openwrt/openwrt.git openwrt; then
-                echo ">>> Clone successful from Official Git."
-            else
-                echo "!!! All clone attempts failed."
-                exit 1
-            fi
+            git clone -b $REPO_BRANCH --single-branch $REPO_URL openwrt
         fi
-        
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
     - name: Update Feeds
@@ -69,11 +60,10 @@ jobs:
         src-git telephony https://git.openwrt.org/feed/telephony.git;openwrt-24.10
         EOF
         
-        # Feed 更新也增加重试机制
-        ./scripts/feeds update -a || (sleep 5 && ./scripts/feeds update -a)
+        ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    - name: Load Config & Inject Scripts
+    - name: Load Config & Generate Files
       run: |
         # 1. 加载配置
         [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
@@ -85,21 +75,88 @@ jobs:
         chmod -R 755 openwrt/files/usr/share/nikki
 
         # =======================================================
-        # 3. 【核心修复：密码】直接修改源码中的 shadow 模板
+        # 3. 【绝对修复】直接生成系统文件 (Files Overlay)
         # =======================================================
-        # Hash 对应密码 "password"
-        sed -i 's/root::0:0:99999:7:::/root:$1$0QHv.E5v$J.7Y2E3uS9P.l0.l0.l0.:19768:0:99999:7:::/g' openwrt/package/base-files/files/etc/shadow
+        
+        # --- A. 密码修复 (直接写入 Shadow 文件) ---
+        # 这是一个标准的 OpenWrt 密码 Hash，对应密码 "password"
+        # 写入此文件后，系统无需任何脚本，开机即为此密码
+        mkdir -p openwrt/files/etc
+        echo 'root:$1$0QHv.E5v$J.7Y2E3uS9P.l0.l0.l0.:19768:0:99999:7:::' > openwrt/files/etc/shadow
 
-        # =======================================================
-        # 4. 【核心修复：语言】修改 LuCI 源码默认设置
-        # =======================================================
-        sed -i 's/luci.main.lang=auto/luci.main.lang=zh_Hans/g' openwrt/feeds/luci/modules/luci-base/root/etc/config/luci 2>/dev/null || true
+        # --- B. 网络修复 (直接生成 network 配置) ---
+        # 强制 eth0=LAN, eth1=WAN，解决 PVE 识别混乱
+        mkdir -p openwrt/files/etc/config
+        cat <<EOF > openwrt/files/etc/config/network
+        config interface 'loopback'
+            option device 'lo'
+            option proto 'static'
+            option ipaddr '127.0.0.1'
+            option netmask '255.0.0.0'
 
-        # 5. 注入启动脚本
+        config globals 'globals'
+            option ula_prefix 'fd46:255d:3909::/48'
+
+        config device
+            option name 'br-lan'
+            option type 'bridge'
+            list ports 'eth0'
+            list ports 'eth2'
+            list ports 'eth3'
+
+        config interface 'lan'
+            option device 'br-lan'
+            option proto 'static'
+            option ipaddr '10.0.0.1'
+            option netmask '255.255.255.0'
+
+        config interface 'wan'
+            option device 'eth1'
+            option proto 'dhcp'
+
+        config interface 'wan6'
+            option device 'eth1'
+            option proto 'dhcpv6'
+        EOF
+
+        # --- C. 防火墙修复 (解决有 IP 没网的问题) ---
+        # 强制生成防火墙配置，确保 WAN 口开启 Masquerade (NAT)
+        # 我们使用 uci-defaults 注入防火墙规则，比直接覆盖 firewall 文件更安全
+        mkdir -p openwrt/files/etc/uci-defaults
+        cat <<EOF > openwrt/files/etc/uci-defaults/99-fix-firewall
+        #!/bin/sh
+        # 强制将 wan/wan6 加入 wan 区域
+        uci delete firewall.@zone[1].network 2>/dev/null
+        uci add_list firewall.@zone[1].network='wan'
+        uci add_list firewall.@zone[1].network='wan6'
+        # 开启区域伪装 (NAT 核心)
+        uci set firewall.@zone[1].masq='1'
+        uci set firewall.@zone[1].mtu_fix='1'
+        # 开启转发
+        uci set firewall.@defaults[0].forward='ACCEPT'
+        uci commit firewall
+        exit 0
+        EOF
+        chmod +x openwrt/files/etc/uci-defaults/99-fix-firewall
+
+        # --- D. 语言修复 (解决开机英文/界面为空) ---
+        # 24.10 版本必须设置 zh_Hans。
+        # 我们不覆盖 /etc/config/luci (这会导致 Design 空白)，而是用脚本设置。
+        cat <<EOF > openwrt/files/etc/uci-defaults/99-fix-language
+        #!/bin/sh
+        uci set luci.main.lang='zh_Hans'
+        # 强制指定 Bootstrap 主题，防止 Design 为空
+        uci set luci.main.mediaurlbase='/luci-static/bootstrap'
+        uci commit luci
+        exit 0
+        EOF
+        chmod +x openwrt/files/etc/uci-defaults/99-fix-language
+
+        # 4. 注入其他脚本 (rc.local 等)
         mkdir -p openwrt/files/etc/uci-defaults
         if [ -e $DIY_SCRIPT ]; then
             cat $DIY_SCRIPT > openwrt/files/etc/uci-defaults/99-custom
-            chmod 755 openwrt/files/etc/uci-defaults/99-custom
+            chmod +x openwrt/files/etc/uci-defaults/99-custom
         fi
 
         cd openwrt
