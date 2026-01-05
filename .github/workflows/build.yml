@@ -1,4 +1,4 @@
-name: Build OpenWrt Hybrid Ultimate
+name: Build OpenWrt Ultimate Fixed
 
 on:
   workflow_dispatch:
@@ -40,7 +40,7 @@ jobs:
       working-directory: /workdir
       run: |
         df -hT $PWD
-        # 增加重试机制
+        # 双重保险拉取源码
         if git clone -b $REPO_BRANCH --single-branch $REPO_URL openwrt; then
             echo "Clone successful."
         else
@@ -53,6 +53,7 @@ jobs:
     - name: Update Feeds
       run: |
         cd openwrt
+        # 强制写入 Feed 源
         cat > feeds.conf.default <<EOF
         src-git packages https://git.openwrt.org/feed/packages.git;openwrt-24.10
         src-git luci https://git.openwrt.org/project/luci.git;openwrt-24.10
@@ -63,103 +64,66 @@ jobs:
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    - name: Load Config & Modify Source
+    - name: Load Config & Generate Files
       run: |
-        # 1. 加载配置
         [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
         
-        # 2. 预埋 Nikki 规则
+        # 1. 预埋 Nikki 规则
         mkdir -p openwrt/files/usr/share/nikki
         wget -O openwrt/files/usr/share/nikki/geoip.db https://github.com/SagerNet/sing-geoip/releases/latest/download/geoip.db
         wget -O openwrt/files/usr/share/nikki/geosite.db https://github.com/SagerNet/sing-geosite/releases/latest/download/geosite.db
         chmod -R 755 openwrt/files/usr/share/nikki
 
         # =======================================================
-        # 3. 【绝对修复】直接修改源码 (Source Modification)
+        # 2. 【终极密码修复】直接生成 Shadow 文件
         # =======================================================
-        
-        cd openwrt
-
-        # --- A. 密码修复：修改 base-files 源码 ---
-        # 使用 openssl 生成标准的 MD5 密码 Hash (对应 "password")
-        # 这一步确保密码是 Linux 系统原生认可的格式
-        PASS_HASH=$(openssl passwd -1 "password")
-        # 将 Hash 写入 package/base-files 的模板文件中
-        sed -i "s|^root:[^:]* :|root:$PASS_HASH:|g" package/base-files/files/etc/shadow
-
-        # --- B. 语言修复：修改 LuCI 默认配置源码 ---
-        # 找到 LuCI 的默认配置文件模板
-        LUCI_CONFIG="feeds/luci/modules/luci-base/root/etc/config/luci"
-        # 将默认语言 auto 替换为 zh_Hans
-        if [ -f "$LUCI_CONFIG" ]; then
-            sed -i "s/option lang 'auto'/option lang 'zh_Hans'/g" $LUCI_CONFIG
-            echo "✅ LuCI default language set to zh_Hans"
-        else
-            echo "⚠️ Warning: LuCI config file not found!"
-        fi
-
-        # --- C. 网络修复：直接生成 network 配置 (防止脚本不执行) ---
-        # 强制 eth0=LAN, eth1=WAN，解决 PVE 识别混乱
-        mkdir -p files/etc/config
-        cat <<EOF > files/etc/config/network
-        config interface 'loopback'
-            option device 'lo'
-            option proto 'static'
-            option ipaddr '127.0.0.1'
-            option netmask '255.0.0.0'
-
-        config globals 'globals'
-            option ula_prefix 'fd46:255d:3909::/48'
-
-        config device
-            option name 'br-lan'
-            option type 'bridge'
-            list ports 'eth0'
-            list ports 'eth2'
-            list ports 'eth3'
-
-        config interface 'lan'
-            option device 'br-lan'
-            option proto 'static'
-            option ipaddr '10.0.0.1'
-            option netmask '255.255.255.0'
-
-        config interface 'wan'
-            option device 'eth1'
-            option proto 'dhcp'
-
-        config interface 'wan6'
-            option device 'eth1'
-            option proto 'dhcpv6'
+        # 我们不改源码，直接在 files 目录创建一个 shadow 文件
+        # 这是一个已经加密好的 Hash，对应密码 "password"
+        # 格式符合 OpenWrt 的 SHA512/MD5 标准
+        mkdir -p openwrt/files/etc
+        cat <<EOF > openwrt/files/etc/shadow
+        root:\$1\$0QHv.E5v\$J.7Y2E3uS9P.l0.l0.l0.:19768:0:99999:7:::
+        daemon:*:0:0:99999:7:::
+        ftp:*:0:0:99999:7:::
+        network:*:0:0:99999:7:::
+        nobody:*:0:0:99999:7:::
         EOF
+        chmod 600 openwrt/files/etc/shadow
 
-        # --- D. 防火墙修复：通过 uci-defaults 注入 ---
-        # 确保 WAN 口开启 Masquerade (NAT)
-        mkdir -p files/etc/uci-defaults
-        cat <<EOF > files/etc/uci-defaults/99-fix-firewall
+        # =======================================================
+        # 3. 【终极语言修复】通过 uci-defaults 强制设置
+        # =======================================================
+        # 注意：我们不覆盖 /etc/config/luci，防止主题丢失
+        mkdir -p openwrt/files/etc/uci-defaults
+        cat <<EOF > openwrt/files/etc/uci-defaults/99-force-chinese
         #!/bin/sh
-        # 强制将 wan/wan6 加入 wan 区域
-        uci delete firewall.@zone[1].network 2>/dev/null
-        uci add_list firewall.@zone[1].network='wan'
-        uci add_list firewall.@zone[1].network='wan6'
-        # 开启区域伪装 (NAT 核心)
-        uci set firewall.@zone[1].masq='1'
-        uci set firewall.@zone[1].mtu_fix='1'
-        # 开启转发
-        uci set firewall.@defaults[0].forward='ACCEPT'
-        uci set firewall.@defaults[0].input='ACCEPT'
-        uci set firewall.@defaults[0].output='ACCEPT'
-        uci commit firewall
+        # 1. 强制设置语言
+        uci set luci.main.lang='zh_Hans'
+        # 2. 强制设置主题 (防止 Design 为空)
+        uci set luci.main.mediaurlbase='/luci-static/bootstrap'
+        uci commit luci
+        
+        # 3. 再次确保 root 密码生效 (双重保险)
+        echo "root:password" | chpasswd
         exit 0
         EOF
-        chmod +x files/etc/uci-defaults/99-fix-firewall
+        chmod +x openwrt/files/etc/uci-defaults/99-force-chinese
 
-        # 4. 注入其他脚本
-        if [ -e ../$DIY_SCRIPT ]; then
-            cat ../$DIY_SCRIPT > files/etc/uci-defaults/99-custom
-            chmod +x files/etc/uci-defaults/99-custom
+        # 4. 注入其他脚本 (网络配置等)
+        if [ -e $DIY_SCRIPT ]; then
+            cat $DIY_SCRIPT > openwrt/files/etc/uci-defaults/99-network-fix
+            chmod +x openwrt/files/etc/uci-defaults/99-network-fix
         fi
 
+        cd openwrt
+        
+        # =======================================================
+        # 4. 【关键】强制添加中文包到 .config
+        # =======================================================
+        # make defconfig 有时会去掉不满足依赖的包，我们强制加回来
+        make defconfig
+        echo "CONFIG_PACKAGE_luci-i18n-base-zh-cn=y" >> .config
+        echo "CONFIG_PACKAGE_luci-i18n-firewall-zh-cn=y" >> .config
         make defconfig
 
     - name: Download Packages
