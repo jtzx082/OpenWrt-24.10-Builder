@@ -68,78 +68,23 @@ jobs:
         chmod -R 755 openwrt/files/usr/share/nikki
 
         # =======================================================
-        # 3. 【核心修复】直接生成配置文件 (无需开机脚本)
+        # 3. 【核心修复：密码】直接修改源码中的 shadow 模板
         # =======================================================
-        mkdir -p openwrt/files/etc/config
-        
-        # --- A. 强制中文 (Luci 配置) ---
-        cat <<EOF > openwrt/files/etc/config/luci
-        config core 'main'
-            option lang 'zh_Hans'
-            option mediaurlbase '/luci-static/bootstrap'
-            option resourcebase '/luci-static/resources'
-        EOF
+        # 这个 Hash 对应密码 "password" (OpenWrt 标准 MD5 格式)
+        # 我们修改 package/base-files 下的文件，确保编译进固件最底层
+        sed -i 's/root::0:0:99999:7:::/root:$1$0QHv.E5v$J.7Y2E3uS9P.l0.l0.l0.:19768:0:99999:7:::/g' openwrt/package/base-files/files/etc/shadow
 
-        # --- B. 强制密码 (Shadow 文件) ---
-        # 这里的 Hash 对应密码 "password"
-        # 直接覆盖 /etc/shadow，这是最稳的方法
-        echo 'root:$1$0QHv.E5v$J.7Y2E3uS9P.l0.l0.l0.:19768:0:99999:7:::' > openwrt/files/etc/shadow
+        # =======================================================
+        # 4. 【核心修复：语言】修改 LuCI 源码默认设置
+        # =======================================================
+        # 这一步确保即使 uci-defaults 没跑，默认也是 zh_Hans
+        sed -i 's/luci.main.lang=auto/luci.main.lang=zh_Hans/g' openwrt/feeds/luci/modules/luci-base/root/etc/config/luci 2>/dev/null || true
 
-        # --- C. 网络配置 (PVE/物理机通用) ---
-        # 明确定义 LAN 和 WAN，防止系统识别错误
-        cat <<EOF > openwrt/files/etc/config/network
-        config interface 'loopback'
-            option device 'lo'
-            option proto 'static'
-            option ipaddr '127.0.0.1'
-            option netmask '255.0.0.0'
-
-        config globals 'globals'
-            option ula_prefix 'fd46:255d:3909::/48'
-
-        config device
-            option name 'br-lan'
-            option type 'bridge'
-            list ports 'eth0'
-            list ports 'eth2'
-            list ports 'eth3'
-
-        config interface 'lan'
-            option device 'br-lan'
-            option proto 'static'
-            option ipaddr '10.0.0.1'
-            option netmask '255.255.255.0'
-
-        config interface 'wan'
-            option device 'eth1'
-            option proto 'dhcp'
-
-        config interface 'wan6'
-            option device 'eth1'
-            option proto 'dhcpv6'
-        EOF
-
-        # --- D. 防火墙配置 (确保 WAN 口能上网) ---
-        # 很多时候 PVE 不通是因为 WAN 没被加到 wan zone
-        # 我们追加配置确保 zone 绑定正确
+        # 5. 注入启动脚本 (确保放到正确位置并赋予权限)
         mkdir -p openwrt/files/etc/uci-defaults
-        cat <<EOF > openwrt/files/etc/uci-defaults/99-firewall-fix
-        #!/bin/sh
-        uci delete firewall.@zone[1].network 2>/dev/null
-        uci add_list firewall.@zone[1].network='wan'
-        uci add_list firewall.@zone[1].network='wan6'
-        uci set firewall.@defaults[0].forward='ACCEPT'
-        uci set firewall.@defaults[0].input='ACCEPT'
-        uci set firewall.@defaults[0].output='ACCEPT'
-        uci commit firewall
-        exit 0
-        EOF
-        chmod +x openwrt/files/etc/uci-defaults/99-firewall-fix
-
-        # 4. 注入其他脚本 (Nikki 等)
         if [ -e $DIY_SCRIPT ]; then
             cat $DIY_SCRIPT > openwrt/files/etc/uci-defaults/99-custom
-            chmod +x openwrt/files/etc/uci-defaults/99-custom
+            chmod 755 openwrt/files/etc/uci-defaults/99-custom
         fi
 
         cd openwrt
