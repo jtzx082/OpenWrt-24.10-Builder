@@ -40,7 +40,6 @@ jobs:
       working-directory: /workdir
       run: |
         df -hT $PWD
-        # 增加重试机制
         if git clone -b $REPO_BRANCH --single-branch $REPO_URL openwrt; then
             echo "Clone successful."
         else
@@ -88,49 +87,76 @@ jobs:
         chmod -R 755 openwrt/files/usr/share/nikki
 
         # =======================================================
-        # 3. 【绝对修复】直接修改源码 (Source Modification)
+        # 3. 【源码级暴力修改】(最稳定的方案)
         # =======================================================
         
         cd openwrt
-
-        # --- A. 密码修复：修改 base-files 源码 (已启用) ---
-        # 这一步是关键！直接修改源码中的 shadow 模板
-        # 下面的 Hash 对应密码 "password"
-        # 这样编译出来的固件，出厂就是这个密码
-        sed -i 's/root::0:0:99999:7:::/root:$1$0QHv.E5v$J.7Y2E3uS9P.l0.l0.l0.:19768:0:99999:7:::/g' package/base-files/files/etc/shadow
-
-        # --- B. 语言修复：修改 LuCI 默认配置源码 ---
-        # 找到 LuCI 的默认配置文件模板，将 auto 改为 zh_Hans
+        
+        # --- A. 密码修复 (直接替换 Shadow 文件中的 root 行) ---
+        # 这种方式比 sed 查找替换更稳，因为它不依赖原文件的具体 Hash 格式
+        # 密码为: password
+        sed -i '/^root:/d' package/base-files/files/etc/shadow
+        sed -i '1i root:$1$0QHv.E5v$J.7Y2E3uS9P.l0.l0.l0.:19768:0:99999:7:::' package/base-files/files/etc/shadow
+        
+        # --- B. 语言修复 ---
         LUCI_CONFIG="feeds/luci/modules/luci-base/root/etc/config/luci"
         if [ -f "$LUCI_CONFIG" ]; then
             sed -i "s/option lang 'auto'/option lang 'zh_Hans'/g" $LUCI_CONFIG
-            echo "✅ LuCI default language set to zh_Hans"
         fi
 
-        # 4. 注入启动脚本到 uci-defaults
-        # 确保脚本被放入系统首次启动执行目录
+        # --- C. 【重点】直接写入静态网络配置文件 ---
+        # 放弃用脚本 uci set，直接生成最终文件，避免被系统覆盖
+        mkdir -p files/etc/config
+        cat > files/etc/config/network <<EOF
+        config interface 'loopback'
+            option device 'lo'
+            option proto 'static'
+            option ipaddr '127.0.0.1'
+            option netmask '255.0.0.0'
+
+        config globals 'globals'
+            option ula_prefix 'fd00:101:101::/48'
+
+        config device
+            option name 'br-lan'
+            option type 'bridge'
+            list ports 'eth0'
+            list ports 'eth2'
+            list ports 'eth3'
+
+        config interface 'lan'
+            option device 'br-lan'
+            option proto 'static'
+            option ipaddr '10.0.0.1'
+            option netmask '255.255.255.0'
+
+        config interface 'wan'
+            option device 'eth1'
+            option proto 'dhcp'
+        
+        config interface 'wan6'
+            option device 'eth1'
+            option proto 'dhcpv6'
+        EOF
+        echo "✅ 静态网络配置文件 network 已生成"
+
+        # 4. 注入启动脚本 (仅用于次要配置)
         mkdir -p files/etc/uci-defaults
         if [ -e ../$DIY_SCRIPT ]; then
             cp ../$DIY_SCRIPT files/etc/uci-defaults/99-custom
-            
-            # === 核心修复：强制去除 Windows 回车符 ===
             sed -i 's/\r$//' files/etc/uci-defaults/99-custom
-            
             chmod +x files/etc/uci-defaults/99-custom
-            echo "✅ 自定义脚本已注入并修复格式"
         fi
 
-        # 5. 生成配置并【强制锁定】中文包
+        # 5. 生成配置
         make defconfig
         
-        # ⚠️ 关键步骤：防止 make defconfig 因依赖问题默默删掉中文包
-        # 我们在 defconfig 之后，再次强制追加语言包配置
+        # 强制锁定中文包
         echo "CONFIG_PACKAGE_luci-i18n-base-zh-cn=y" >> .config
         echo "CONFIG_PACKAGE_luci-i18n-firewall-zh-cn=y" >> .config
         echo "CONFIG_PACKAGE_luci-i18n-opkg-zh-cn=y" >> .config
         echo "CONFIG_PACKAGE_luci-i18n-package-manager-zh-cn=y" >> .config
         
-        # 最后再运行一次 defconfig 确保依赖树完整
         make defconfig
 
     - name: Download Packages
