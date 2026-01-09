@@ -58,6 +58,12 @@ jobs:
         src-git luci https://git.openwrt.org/project/luci.git;openwrt-24.10
         src-git routing https://git.openwrt.org/feed/routing.git;openwrt-24.10
         src-git telephony https://git.openwrt.org/feed/telephony.git;openwrt-24.10
+        src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main
+        src-git luci_im https://github.com/immortalwrt/luci.git;openwrt-24.10
+        src-git packages_im https://github.com/immortalwrt/packages.git;openwrt-24.10
+        src-git istore https://github.com/linkease/istore;main
+        src-git packages_is https://github.com/jjm2473/packages.git;istoreos-24.10
+        src-git luci_is https://github.com/jjm2473/luci.git;istoreos-24.10
         EOF
         
         ./scripts/feeds update -a
